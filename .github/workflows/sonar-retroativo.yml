@@ -43,8 +43,9 @@ jobs:
           PR=$(echo '${{ inputs.prs }}' | jq -r '.[0].pr')
           PRIMEIRO=$(echo '${{ inputs.prs }}' | jq -r '.[0].sha')
           git fetch -q origin "$PRIMEIRO" 2>/dev/null || true
-          BASE=$(gh api "repos/${{ vars.UPSTREAM }}/pulls/$PR/commits?per_page=100" --jq '.[0].parents[0].sha' 2>/dev/null || true)
-          BASE=${BASE:-$(git rev-parse "$PRIMEIRO~1")}
+          # a main de onde o primeiro PR saiu
+          BASE=$(gh api "repos/${{ vars.UPSTREAM }}/pulls/$PR/commits?per_page=100" --jq '.[0].parents[0].sha' 2>/dev/null) || BASE=""
+          [[ "$BASE" =~ ^[0-9a-f]{40}$ ]] || BASE=$(git rev-parse "$PRIMEIRO~1")
           git fetch -q origin "$BASE" 2>/dev/null || true
           echo "Commit de referencia da main: $BASE"
           git checkout -q "$BASE"
@@ -99,15 +100,30 @@ jobs:
           git fetch origin "$SHA" 2>/dev/null || git fetch origin "+refs/pull/$PR/head:refs/remotes/origin/pr-head"
           git checkout -q "$SHA"
           git log -1 --format='Commit do PR: %H de %ci: %s'
-          BASE=$(gh api "repos/${{ vars.UPSTREAM }}/pulls/$PR" --jq .base.sha 2>/dev/null || true)
-          if [ -n "$BASE" ]; then
+          # "main" local = a main de onde o PR saiu, para o código novo ser
+          # só o que o PR mudou. (A main atual já contém os commits do PR.)
+          MB=""
+          # 1) base registrada no PR
+          BASE=$(gh api "repos/${{ vars.UPSTREAM }}/pulls/$PR" --jq .base.sha 2>/dev/null) || BASE=""
+          if [[ "$BASE" =~ ^[0-9a-f]{40}$ ]]; then
             git fetch -q origin "$BASE" 2>/dev/null || true
-            MB=$(git merge-base "$SHA" "$BASE" 2>/dev/null || true)
+            MB=$(git merge-base "$SHA" "$BASE" 2>/dev/null) || MB=""
           fi
-          if [ -z "${MB:-}" ] || [ "$MB" = "$SHA" ]; then
-            FIRST=$(gh api "repos/${{ vars.UPSTREAM }}/pulls/$PR/commits?per_page=100" --jq '.[0].parents[0].sha' 2>/dev/null || true)
-            MB=${FIRST:-$(git rev-parse "$SHA~1")}
-            echo "Aviso: base calculada pelo primeiro commit do PR."
+          # 2) pai do primeiro commit do PR
+          if [ -z "$MB" ] || [ "$MB" = "$SHA" ]; then
+            FIRST=$(gh api "repos/${{ vars.UPSTREAM }}/pulls/$PR/commits?per_page=100" --jq '.[0].parents[0].sha' 2>/dev/null) || FIRST=""
+            if [[ "$FIRST" =~ ^[0-9a-f]{40}$ ]]; then
+              git fetch -q origin "$FIRST" 2>/dev/null || true
+              MB="$FIRST"; echo "Aviso: base calculada pelo primeiro commit do PR."
+            fi
+          fi
+          # 3) PR não encontrado: main como estava na data do commit
+          if [ -z "$MB" ] || [ "$MB" = "$SHA" ]; then
+            DATA=$(git log -1 --format=%cI "$SHA")
+            MAIN_ANTES=$(git rev-list -1 --first-parent --before="$DATA" origin/main)
+            MB=$(git merge-base "$SHA" "$MAIN_ANTES" 2>/dev/null) || MB=""
+            [ -z "$MB" ] || [ "$MB" = "$SHA" ] && MB=$(git rev-parse "$SHA~1")
+            echo "Aviso: PR nao encontrado no GitHub; base = main na data do commit ($DATA)."
           fi
           git branch -f main "$MB"
           echo "Base do PR (main de referencia): $MB"
